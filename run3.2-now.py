@@ -45,7 +45,13 @@ def main():
     # ---------------- Step 1: 连接飞控 ----------------
     print(f"�� [树莓派] 正在通过 USB 连接飞控: {CONNECTION_STRING} ...")
     try:
-        vehicle = connect(CONNECTION_STRING, wait_ready=True, baud=BAUD_RATE)
+        vehicle = connect(
+            CONNECTION_STRING, 
+            wait_ready=True, 
+            baud=BAUD_RATE, 
+            source_system=1,       # 关键修改：避免与地面站冲突
+            source_component=191   # 关键修改：表明身份是机载电脑
+        )
         print("✅ 飞控连接成功！")
     except Exception as e:
         print(f"❌ 连接失败: {e}")
