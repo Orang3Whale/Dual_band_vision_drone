@@ -1,0 +1,2 @@
+gazebo --verbose worlds/iris_arducopter_runway.world  打开世界
+sudo nano /etc/systemd/system/drone.service  自启程序
