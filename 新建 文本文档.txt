@@ -1,2 +1,4 @@
 gazebo --verbose worlds/iris_arducopter_runway.world  打开世界
 sudo nano /etc/systemd/system/drone.service  自启程序
+git config --global http.proxy http://127.0.0.1:7890
+git config --global https.proxy http://127.0.0.1:7890
