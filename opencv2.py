@@ -1,139 +1,227 @@
 import cv2
 import numpy as np
+import time
+from dronekit import connect, VehicleMode, LocationGlobalRelative
+from pymavlink import mavutil
 
-# --- 调试滑块默认值 (橙色) ---
-# 如果环境太亮导致橙色发白，请在运行时拉高 S Min，拉低 V Min
-h_min, s_min, v_min = 5, 120, 80
-h_max, s_max, v_max = 28, 255, 255
+# ================= ⚙️ 参数配置区域 ⚙️ =================
 
+# --- 1. 飞控连接 ---
+CONNECTION_STRING = '/dev/ttyACM0'
+BAUD_RATE = 115200
 
-def nothing(x): pass
+# --- 2. 视觉阈值 (橙色) ---
+H_MIN, S_MIN, V_MIN = 5, 120, 80
+H_MAX, S_MAX, V_MAX = 28, 255, 255
 
+# --- 3. 飞行控制参数 ---
+MAX_SPEED_XY = 0.25      # 搜索速度
+LAND_SPEED_XY = 0.1      # 降落修正速度
+LAND_SPEED_Z = 0.2       # 垂直下降速度 (全程匀速)
 
-def init_trackbars():
-    cv2.namedWindow("Tuner")
-    cv2.resizeWindow("Tuner", 400, 200)
-    cv2.createTrackbar("H Min", "Tuner", h_min, 179, nothing)
-    cv2.createTrackbar("S Min", "Tuner", s_min, 255, nothing)
-    cv2.createTrackbar("V Min", "Tuner", v_min, 255, nothing)
-    cv2.createTrackbar("H Max", "Tuner", h_max, 179, nothing)
+Kp_X = 0.001
+Kp_Y = 0.001
 
+# --- 4. 逻辑阈值 ---
+ALIGN_THRESHOLD = 50       # 对准阈值
+HOVER_DURATION = 3.0       # 悬停时间
+MIN_AREA = 1000            # 最小面积
+MAX_TARGET_AREA = 215000   # 盲降面积 (屏幕的70%)
+
+# --- 5. 系统设置 ---
+TARGET_FPS = 30
+FRAME_INTERVAL = 1.0 / TARGET_FPS
+CMD_FREQ_DIVIDER = 2
+CAMERA_PATH = "/dev/v4l/by-id/usb-Generic_USB_Camera_200901010001-video-index0"
+
+# ========================================================
+
+def send_body_velocity(vehicle, velocity_x, velocity_y, velocity_z):
+    msg = vehicle.message_factory.set_position_target_local_ned_encode(
+        0, 0, 0,
+        mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+        0b0000111111000111,
+        0, 0, 0,
+        velocity_x, velocity_y, velocity_z,
+        0, 0, 0, 0, 0)
+    vehicle.send_mavlink(msg)
 
 def main():
-    cap = cv2.VideoCapture(0)
-    # 强制设置 720P 分辨率
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    # ---------------- Step 1: 连接飞控 ----------------
+    print(f"🐢 [无画面模式] 连接飞控: {CONNECTION_STRING} ...")
+    try:
+        vehicle = connect(
+            CONNECTION_STRING,
+            wait_ready=True,
+            baud=BAUD_RATE,
+            source_system=200,
+            source_component=191
+        )
+        print(f"✅ 连接成功 | GPS: {vehicle.gps_0.fix_type} | Mode: {vehicle.mode.name}")
+    except Exception as e:
+        print(f"❌ 连接失败: {e}")
+        return
 
-    # 画面中心点坐标
-    CENTER_X, CENTER_Y = 640, 360
+    # ---------------- Step 2: 启动摄像头 ----------------
+    print("📷 正在后台启动摄像头...")
+    cap = None
+    try:
+        cap = cv2.VideoCapture(1)
+        if not cap.isOpened():
+            cap = cv2.VideoCapture(CAMERA_PATH, cv2.CAP_V4L2)
+    except:
+        pass
 
-    init_trackbars()
+    if cap is None or not cap.isOpened():
+        print("⚠️ 尝试备用 Index 0 ...")
+        cap = cv2.VideoCapture(0)
 
-    print("\n=== 视觉定位程序启动 ===")
-    print(f"{'X 误差':^12} | {'Y 误差':^12} | {'指令建议'}")
-    print("-" * 50)
+    if not cap.isOpened():
+        print("❌ 摄像头启动失败")
+        vehicle.close()
+        return
 
-    while True:
-        ret, frame = cap.read()
-        if not ret: break
+    # 设置参数
+    cap.set(3, 640)
+    cap.set(4, 480)
+    # 尝试禁用自动白平衡和自动曝光（可选，取决于摄像头支持）
+    # cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25) 
+    
+    CENTER_X, CENTER_Y = 320, 240
+    print("✅ 摄像头就绪 (无GUI显示)")
 
-        # 1. 获取滑块值
-        h1 = cv2.getTrackbarPos("H Min", "Tuner")
-        s1 = cv2.getTrackbarPos("S Min", "Tuner")
-        v1 = cv2.getTrackbarPos("V Min", "Tuner")
-        h2 = cv2.getTrackbarPos("H Max", "Tuner")
+    # ---------------- Step 3: 逻辑循环 ----------------
+    print("⏳ 等待切入 GUIDED 模式...")
+    while vehicle.mode.name != "GUIDED":
+        time.sleep(1)
+    
+    print("\n🚀 GUIDED 激活！视觉控制开始 (按 Ctrl+C 退出)\n")
 
-        # 2. 颜色提取 (HSV)
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, np.array([h1, s1, v1]), np.array([h2, 255, 255]))
+    hover_start_time = None
+    landing_mode = False
+    kernel = np.ones((7, 7), np.uint8)
+    prev_loop_time = time.time()
+    loop_counter = 0
 
-        # 3. 形态学处理 (关键：把空心的圆环糊成实心的饼)
-        kernel = np.ones((7, 7), np.uint8)
-        # 开运算去噪
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        # 闭运算连接断裂处并填满内部空洞
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+    try:
+        while True:
+            loop_start_time = time.time()
+            loop_counter += 1
 
-        # 4. 寻找轮廓
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # --- 模式监控 ---
+            if vehicle.mode.name != "GUIDED":
+                print("\n⚠️ 模式变更 -> 暂停控制")
+                landing_mode = False
+                hover_start_time = None
+                while vehicle.mode.name != "GUIDED":
+                    time.sleep(0.5)
+                print("✅ 恢复 GUIDED 控制")
 
-        target_found = False
+            # --- 视觉处理 ---
+            ret, frame = cap.read()
+            if not ret:
+                print("\n❌ 视频流中断")
+                break
 
-        if contours:
-            # 假设最大的橙色色块就是靶标
-            c = max(contours, key=cv2.contourArea)
-            area = cv2.contourArea(c)
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(hsv, np.array([H_MIN, S_MIN, V_MIN]), np.array([H_MAX, S_MAX, V_MAX]))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-            # 只有面积够大才认为是靶标 (防止误报)
-            if area > 1000:
-                target_found = True
+            # --- 决策逻辑 ---
+            vx, vy, vz = 0, 0, 0
+            info = "Search"
+            current_alt = vehicle.location.global_relative_frame.alt 
 
-                # 获取最小外接圆中心
-                ((tx, ty), radius) = cv2.minEnclosingCircle(c)
-                tx, ty, radius = int(tx), int(ty), int(radius)
+            if contours:
+                c = max(contours, key=cv2.contourArea)
+                area = cv2.contourArea(c)
 
-                # ==========================================
-                #       核心：计算相对于画面中心的误差
-                # ==========================================
+                # 1. 盲降逻辑
+                if area > MAX_TARGET_AREA:
+                    vx, vy = 0, 0
+                    vz = LAND_SPEED_Z
+                    info = "BLIND-LAND"
+                    if not landing_mode: landing_mode = True
 
-                # X轴误差：目标x - 中心x
-                # 结果 < 0 : 目标在左边 (无人机需向左)
-                # 结果 > 0 : 目标在右边 (无人机需向右)
-                err_x = tx - CENTER_X
+                # 2. 正常修正
+                elif area > MIN_AREA:
+                    ((tx, ty), radius) = cv2.minEnclosingCircle(c)
+                    err_x = int(tx - CENTER_X)
+                    err_y = int(CENTER_Y - ty)
 
-                # Y轴误差：中心y - 目标y (注意顺序！因为图像Y轴向下是正)
-                # 结果 > 0 : 目标在上方 (无人机需向前)
-                # 结果 < 0 : 目标在下方 (无人机需向后)
-                err_y = CENTER_Y - ty
+                    limit = LAND_SPEED_XY if landing_mode else MAX_SPEED_XY
+                    vx = np.clip(err_y * Kp_X, -limit, limit)
+                    vy = np.clip(err_x * Kp_Y, -limit, limit)
 
-                # ==========================================
-                #       可视化绘制
-                # ==========================================
+                    if abs(err_x) < ALIGN_THRESHOLD and abs(err_y) < ALIGN_THRESHOLD:
+                        if not landing_mode:
+                            if hover_start_time is None: hover_start_time = time.time()
+                            elapsed = time.time() - hover_start_time
+                            info = f"LOCK:{3.0 - elapsed:.1f}s"
+                            if elapsed >= HOVER_DURATION:
+                                print("\n✅ 锁定完成 -> 开始降落")
+                                landing_mode = True
+                        else:
+                            info = "PRECISION-LAND"
+                    else:
+                        if not landing_mode:
+                            hover_start_time = None
+                            info = f"ADJUST X:{err_x} Y:{err_y}"
+                        else:
+                            info = "LAND-ADJUST"
+                    
+                    if landing_mode: vz = LAND_SPEED_Z
 
-                # 1. 画出识别到的圆
-                cv2.circle(frame, (tx, ty), radius, (0, 255, 255), 2)
-                # 2. 画中心红点
-                cv2.circle(frame, (tx, ty), 6, (0, 0, 255), -1)
-                # 3. 画一根线牵着它 (从屏幕中心到目标中心)
-                line_color = (0, 255, 0) if (abs(err_x) < 50 and abs(err_y) < 50) else (255, 0, 255)
-                cv2.line(frame, (CENTER_X, CENTER_Y), (tx, ty), line_color, 2)
-
-                # 4. 在画面上写出数值
-                text = f"X:{err_x} Y:{err_y}"
-                cv2.putText(frame, text, (tx - 60, ty - radius - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-
-                # 5. 终端打印
-                action = ""
-                if abs(err_x) < 40 and abs(err_y) < 40:
-                    action = "[[悬停/降落]]"
+            else:
+                # 3. 丢失目标
+                if landing_mode:
+                    vx, vy, vz = 0, 0, LAND_SPEED_Z
+                    info = "LOST-GPS-LAND"
                 else:
-                    action += "左飞 " if err_x < 0 else "右飞 "
-                    action += "前飞 " if err_y > 0 else "后飞 "
+                    hover_start_time = None
+                    info = "SEARCHING"
 
-                print(f"\r X误差: {err_x:5d} | Y误差: {err_y:5d} | {action:<10}", end="")
+            # --- 触地检测 ---
+            if landing_mode and current_alt < 0.2:
+                print(f"\n✅ 触地 (Alt: {current_alt:.2f}m) -> 切换 LAND")
+                send_body_velocity(vehicle, 0, 0, 0)
+                vehicle.mode = VehicleMode("LAND")
+                break
 
-        if not target_found:
-            print(f"\r {'正在搜索目标...':^40}", end="")
+            # --- 发送指令 ---
+            if loop_counter % CMD_FREQ_DIVIDER == 0:
+                send_body_velocity(vehicle, vx, vy, vz)
 
-        # 画屏幕准星
-        cv2.line(frame, (CENTER_X - 20, CENTER_Y), (CENTER_X + 20, CENTER_Y), (150, 150, 150), 2)
-        cv2.line(frame, (CENTER_X, CENTER_Y - 20), (CENTER_X, CENTER_Y + 20), (150, 150, 150), 2)
+            # --- 终端数值显示 ---
+            # 使用 \r 回车符实现单行刷新，不会刷屏
+            fps = 1.0 / (time.time() - prev_loop_time + 1e-6)
+            prev_loop_time = time.time()
+            
+            # 格式化输出字符串
+            status_str = f"FPS:{fps:4.1f} | Alt:{current_alt:4.1f}m | Mode:{'LANDING' if landing_mode else 'TRACKING'} | {info}"
+            # 补空格防止字符残留，end="" 不换行
+            print(f"\r{status_str:<60}", end="")
 
-        # 缩小显示
-        disp = cv2.resize(frame, (960, 540))
-        mask_disp = cv2.resize(mask, (480, 270))
+            # 帧率限制
+            dt = time.time() - loop_start_time
+            if dt < FRAME_INTERVAL:
+                time.sleep(FRAME_INTERVAL - dt)
 
-        cv2.imshow("Main View", disp)
-        cv2.imshow("Tuner Mask", mask_disp)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
+    except KeyboardInterrupt:
+        print("\n\n🛑 用户强制停止 (Ctrl+C)")
+    except Exception as e:
+        print(f"\n\n❌ 错误: {e}")
+    finally:
+        print("正在安全退出...")
+        if 'vehicle' in locals():
+            send_body_velocity(vehicle, 0, 0, 0)
+            vehicle.mode = VehicleMode("LAND") # 最后的保险
+            vehicle.close()
+        if cap:
+            cap.release()
+        print("✅ 完成")
 
 if __name__ == "__main__":
     main()
