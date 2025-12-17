@@ -28,7 +28,7 @@ def main():
     print(f"🚀 启动低功耗模式 | 分辨率: {FRAME_WIDTH}x{FRAME_HEIGHT} | 限制: {TARGET_FPS} FPS")
 
     # 1. 初始化摄像头 (优先尝试 index 0)
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(1)
     if not cap.isOpened():
         print("⚠️ 尝试自动搜索摄像头...")
         cap = cv2.VideoCapture(-1)
