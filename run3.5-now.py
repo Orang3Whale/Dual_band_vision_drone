@@ -27,8 +27,8 @@ Kd_X = 0.0028
 Kd_Y = 0.0028
 
 # --- 4. 逻辑阈值 ---
-ALIGN_THRESHOLD = 60 # 像素误差小于此值认为对准
-HOVER_DURATION = 3.5  # 悬停保持时间 (秒)
+ALIGN_THRESHOLD = 100 # 像素误差小于此值认为对准
+HOVER_DURATION = 1.5  # 悬停保持时间 (秒)
 MIN_AREA = 1000  # 最小识别面积
 
 # --- 5. 帧率与通信限制 ---
