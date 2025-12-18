@@ -11,8 +11,8 @@ CONNECTION_STRING = '/dev/ttyACM0'
 BAUD_RATE = 115200
 
 # --- 2. 视觉阈值 (橙色目标) ---
-H_MIN, S_MIN, V_MIN = 14 , 125, 150
-H_MAX, S_MAX, V_MAX = 179, 255, 255
+H_MIN, S_MIN, V_MIN = 14 , 106, 143
+H_MAX, S_MAX, V_MAX = 87, 209, 255
 
 # --- 3. PD 飞行控制参数 (已添加 D 项) ---
 MAX_SPEED = 1.45 # 最大飞行速度 (m/s)
