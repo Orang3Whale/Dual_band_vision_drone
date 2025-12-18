@@ -11,11 +11,11 @@ CONNECTION_STRING = '/dev/ttyACM0'
 BAUD_RATE = 115200
 
 # --- 2. 视觉阈值 (橙色目标) ---
-H_MIN, S_MIN, V_MIN = 9, 130, 172
+H_MIN, S_MIN, V_MIN = 14 , 125, 150
 H_MAX, S_MAX, V_MAX = 179, 255, 255
 
 # --- 3. PD 飞行控制参数 (已添加 D 项) ---
-MAX_SPEED = 1.45  # 最大飞行速度 (m/s)
+MAX_SPEED = 1.55  # 最大飞行速度 (m/s)
 
 # P (比例): 决定修正的快慢
 Kp_X = 0.0060
@@ -26,7 +26,7 @@ Kp_Y = 0.0060
 Kd_X = 0.003
 Kd_Y = 0.003
 
-ALPHA = 0.55  # D 项低通滤波系数 (0~1)，值越大响应越快，但抖动也越明显
+ALPHA = 0.8  # D 项低通滤波系数 (0~1)，值越大响应越快，但抖动也越明显
 # --- 4. 逻辑阈值 ---
 ALIGN_THRESHOLD = 85  # 像素误差小于此值认为对准
 HOVER_DURATION = 1.2  # 悬停保持时间 (秒)
