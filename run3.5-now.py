@@ -15,7 +15,7 @@ H_MIN, S_MIN, V_MIN = 9, 130, 172
 H_MAX, S_MAX, V_MAX = 179, 255, 255
 
 # --- 3. PD 飞行控制参数 (已添加 D 项) ---
-MAX_SPEED = 1.55  # 最大飞行速度 (m/s)
+MAX_SPEED = 1.45  # 最大飞行速度 (m/s)
 
 # P (比例): 决定修正的快慢
 Kp_X = 0.0060
@@ -26,10 +26,10 @@ Kp_Y = 0.0060
 Kd_X = 0.003
 Kd_Y = 0.003
 
-
+ALPHA = 0.55  # D 项低通滤波系数 (0~1)，值越大响应越快，但抖动也越明显
 # --- 4. 逻辑阈值 ---
-ALIGN_THRESHOLD = 85 # 像素误差小于此值认为对准
-HOVER_DURATION = 0.9  # 悬停保持时间 (秒)
+ALIGN_THRESHOLD = 85  # 像素误差小于此值认为对准
+HOVER_DURATION = 1.2  # 悬停保持时间 (秒)
 MIN_AREA = 1000  # 最小识别面积
 
 # --- 5. 帧率与通信限制 ---
@@ -112,7 +112,9 @@ def main():
     prev_time = time.time()
     last_err_x = 0.0
     last_err_y = 0.0
-    
+    d_lpf_x = 0    # D 项低通滤波历史
+    d_lpf_y = 0    # D 项低通滤波历史
+     # D 项低通滤波系数
     loop_counter = 0
 
     try:
@@ -134,8 +136,10 @@ def main():
                     time.sleep(1)
                 print("✅ 恢复控制！")
                 # 恢复控制时重置 D 项历史，防止瞬间 D 值过大
-                last_err_x, last_err_y = 0, 0
+                last_err_x, last_err_y,d_lpf_x,d_lpf_y = 0, 0, 0, 0
                 hover_start_time = None
+                prev_time = time.time() # 防止 dt 计算错误
+                continue # 跳过本次循环，重新开始
 
             # --- 读取画面 ---
             ret, frame = cap.read()
@@ -158,18 +162,25 @@ def main():
                     ((tx, ty), radius) = cv2.minEnclosingCircle(c)
                     err_x = int(tx - CENTER_X)
                     err_y = int(CENTER_Y - ty)
-
+                   
+                    
+          
                  
                     
                     # --- X轴 PD (控制 Vy / 左右) ---
                     # P项: 误差 * 比例
                     P_x = err_x * Kp_X
                     # D项: (当前误差 - 上次误差) / 时间差 * 微分系数
-                    D_x = ((err_x - last_err_x) / dt) * Kd_X
+                    raw_diff_x = (err_x - last_err_x) / dt
+                    d_lpf_x = (ALPHA * raw_diff_x) + ((1.0 - ALPHA) * d_lpf_x)
+                    D_x = d_lpf_x * Kd_X
                     
                     # --- Y轴 PD (控制 Vx / 前后) ---
+
                     P_y = err_y * Kp_Y
-                    D_y = ((err_y - last_err_y) / dt) * Kd_Y
+                    raw_diff_y = (err_y - last_err_y) / dt
+                    d_lpf_y = (ALPHA * raw_diff_y) + ((1.0 - ALPHA) * d_lpf_y)
+                    D_y = d_lpf_y * Kd_Y
 
                     # 合成 PD 输出
                     # 注意：图像X轴误差 -> 控制无人机Y轴速度
@@ -202,9 +213,9 @@ def main():
                         target_info = f"PD修正 | Vx:{velocity_x:.2f} Vy:{velocity_y:.2f}"
                 else:
                     # 丢失目标时重置 D 项历史
-                    last_err_x, last_err_y = 0, 0
+                    last_err_x, last_err_y,d_lpf_x,d_lpf_y = 0, 0, 0, 0
             else:
-                last_err_x, last_err_y = 0, 0
+                last_err_x, last_err_y,d_lpf_x,d_lpf_y = 0, 0, 0, 0
 
             # 通信降频
             if loop_counter % CMD_FREQ_DIVIDER == 0:
